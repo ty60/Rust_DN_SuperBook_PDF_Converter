@@ -1667,14 +1667,67 @@ impl PdfPipeline {
                         blocks: r
                             .text_blocks
                             .iter()
-                            .map(|b| TextBlock {
-                                x: b.bbox.0 as f64 * px_to_pt,
-                                y: b.bbox.1 as f64 * px_to_pt,
-                                width: (b.bbox.2 - b.bbox.0) as f64 * px_to_pt,
-                                height: (b.bbox.3 - b.bbox.1) as f64 * px_to_pt,
-                                text: b.text.clone(),
-                                font_size: b.font_size.unwrap_or(12.0) as f64 * px_to_pt,
-                                vertical: matches!(b.direction, crate::TextDirection::Vertical),
+                            .flat_map(|b| {
+                                let x_pt = b.bbox.0 as f64 * px_to_pt;
+                                let y_pt = b.bbox.1 as f64 * px_to_pt;
+                                let w_pt = b.bbox.2 as f64 * px_to_pt;
+                                let h_pt = b.bbox.3 as f64 * px_to_pt;
+                                let vertical =
+                                    matches!(b.direction, crate::TextDirection::Vertical);
+                                // YomiToku paragraphs can span multiple visual lines. Split
+                                // on newlines and lay each line out along the block's
+                                // writing axis so invisible text tracks the page content.
+                                let lines: Vec<&str> = b
+                                    .text
+                                    .split('\n')
+                                    .map(|s| s.trim_end())
+                                    .filter(|s| !s.is_empty())
+                                    .collect();
+                                let n = lines.len().max(1) as f64;
+                                lines
+                                    .into_iter()
+                                    .enumerate()
+                                    .map(|(i, line)| {
+                                        let k = i as f64;
+                                        // Approximate glyph advance: CJK ≈ 1em/char,
+                                        // ASCII ≈ 0.5em/char. Treat non-ASCII as
+                                        // full-width to size the font conservatively.
+                                        let em_units: f64 = line
+                                            .chars()
+                                            .map(|c| if c.is_ascii() { 0.5 } else { 1.0 })
+                                            .sum::<f64>()
+                                            .max(1.0);
+                                        if vertical {
+                                            let col_w = w_pt / n;
+                                            // Fit font to column width (glyph size)
+                                            // and to column height (total advance).
+                                            let fit_len = h_pt / em_units;
+                                            let font_size = col_w.min(fit_len).max(1.0);
+                                            TextBlock {
+                                                x: x_pt + (n - 1.0 - k) * col_w,
+                                                y: y_pt,
+                                                width: col_w,
+                                                height: h_pt,
+                                                text: line.to_string(),
+                                                font_size,
+                                                vertical: true,
+                                            }
+                                        } else {
+                                            let row_h = h_pt / n;
+                                            let fit_len = w_pt / em_units;
+                                            let font_size = row_h.min(fit_len).max(1.0);
+                                            TextBlock {
+                                                x: x_pt,
+                                                y: y_pt + k * row_h,
+                                                width: w_pt,
+                                                height: row_h,
+                                                text: line.to_string(),
+                                                font_size,
+                                                vertical: false,
+                                            }
+                                        }
+                                    })
+                                    .collect::<Vec<_>>()
                             })
                             .collect(),
                     })

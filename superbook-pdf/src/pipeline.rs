@@ -1247,7 +1247,12 @@ impl PdfPipeline {
         }
         let options = options.build();
 
-        match esrgan.upscale_batch(images, &upscaled_dir, &options, None) {
+        let total_pages = images.len();
+        let cb: Option<Box<dyn Fn(usize, usize) + Send + '_>> =
+            Some(Box::new(move |done, _total| {
+                progress.on_step_progress(done, total_pages);
+            }));
+        match esrgan.upscale_batch(images, &upscaled_dir, &options, cb) {
             Ok(result) => {
                 progress
                     .on_step_complete("Upscaling", &format!("{} images", result.successful.len()));
@@ -1620,11 +1625,13 @@ impl PdfPipeline {
         let ocr_opts = ocr_opts.build();
 
         let mut results = Vec::new();
-        for img_path in images {
+        let total = images.len();
+        for (i, img_path) in images.iter().enumerate() {
             match yomitoku.ocr(img_path, &ocr_opts) {
                 Ok(result) => results.push(Some(result)),
                 Err(_) => results.push(None),
             }
+            progress.on_step_progress(i + 1, total);
         }
 
         let success_count = results.iter().filter(|r| r.is_some()).count();

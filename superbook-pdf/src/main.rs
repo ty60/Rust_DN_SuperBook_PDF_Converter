@@ -93,22 +93,30 @@ impl VerboseProgress {
 
 impl ProgressCallback for VerboseProgress {
     fn on_step_start(&self, step: &str) {
-        if self.verbose_level > 0 {
-            println!("  {}", step);
-        }
+        println!("▶ {}", step);
+        std::io::stdout().flush().ok();
     }
 
     fn on_step_progress(&self, current: usize, total: usize) {
-        if self.verbose_level > 0 {
-            print!("\r    Progress: {}/{}", current, total);
-            std::io::stdout().flush().ok();
+        if total == 0 {
+            return;
         }
+        let width: usize = 30;
+        let filled = (current * width / total).min(width);
+        let pct = (current * 100 / total).min(100);
+        let bar: String = "=".repeat(filled) + &" ".repeat(width - filled);
+        print!("\r  [{}] {}/{} ({}%)", bar, current, total, pct);
+        if current >= total {
+            println!();
+        }
+        std::io::stdout().flush().ok();
     }
 
-    fn on_step_complete(&self, step: &str, message: &str) {
-        if self.verbose_level > 0 {
-            println!("    {}: {}", step, message);
+    fn on_step_complete(&self, _step: &str, message: &str) {
+        if !message.is_empty() {
+            println!("  ✓ {}", message);
         }
+        std::io::stdout().flush().ok();
     }
 
     fn on_debug(&self, message: &str) {

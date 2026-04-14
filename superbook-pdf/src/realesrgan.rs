@@ -342,21 +342,21 @@ pub trait RealEsrganProcessor {
     ) -> Result<UpscaleResult>;
 
     /// Batch upscale
-    fn upscale_batch(
+    fn upscale_batch<'cb>(
         &self,
         input_files: &[PathBuf],
         output_dir: &Path,
         options: &RealEsrganOptions,
-        progress: Option<Box<dyn Fn(usize, usize) + Send>>,
+        progress: Option<Box<dyn Fn(usize, usize) + Send + 'cb>>,
     ) -> Result<BatchUpscaleResult>;
 
     /// Upscale all images in directory
-    fn upscale_directory(
+    fn upscale_directory<'cb>(
         &self,
         input_dir: &Path,
         output_dir: &Path,
         options: &RealEsrganOptions,
-        progress: Option<Box<dyn Fn(usize, usize) + Send>>,
+        progress: Option<Box<dyn Fn(usize, usize) + Send + 'cb>>,
     ) -> Result<BatchUpscaleResult>;
 
     /// Get available models
@@ -469,12 +469,12 @@ impl RealEsrgan {
     }
 
     /// Batch upscale multiple images
-    pub fn upscale_batch(
+    pub fn upscale_batch<'cb>(
         &self,
         input_files: &[PathBuf],
         output_dir: &Path,
         options: &RealEsrganOptions,
-        progress: Option<Box<dyn Fn(usize, usize) + Send>>,
+        progress: Option<Box<dyn Fn(usize, usize) + Send + 'cb>>,
     ) -> Result<BatchUpscaleResult> {
         let start_time = std::time::Instant::now();
         let mut successful = Vec::new();
@@ -514,12 +514,12 @@ impl RealEsrgan {
     }
 
     /// Upscale all images in a directory
-    pub fn upscale_directory(
+    pub fn upscale_directory<'cb>(
         &self,
         input_dir: &Path,
         output_dir: &Path,
         options: &RealEsrganOptions,
-        progress: Option<Box<dyn Fn(usize, usize) + Send>>,
+        progress: Option<Box<dyn Fn(usize, usize) + Send + 'cb>>,
     ) -> Result<BatchUpscaleResult> {
         // Find all image files in directory
         let mut input_files = Vec::new();

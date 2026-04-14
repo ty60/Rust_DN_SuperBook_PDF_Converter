@@ -640,25 +640,37 @@ impl PrintPdfWriter {
     ) -> Result<()> {
         use printpdf::Mm;
 
+        // Oversize the font so the viewer's selection rectangle (derived from
+        // font ascent/descent) fully covers the scanned glyph row. Horizontal
+        // advance is re-compressed via Tz so text still fits the bbox width.
+        const OVERSIZE: f32 = 1.25;
+        // Lift baseline above the row bottom so descenders don't drop below
+        // the visible line (row_bottom + BASELINE_LIFT * row_height).
+        const BASELINE_LIFT: f32 = 0.15;
+
         for block in &page_text.blocks {
             if block.text.is_empty() {
                 continue;
             }
 
-            // Convert points to mm
             let x_mm = block.x as f32 * POINTS_TO_MM;
-            // PDF coordinate system has origin at bottom-left, so flip y
+            let row_height_mm = block.height as f32 * POINTS_TO_MM;
+            // PDF coordinate system has origin at bottom-left, so flip y.
+            // Place the baseline slightly above the row bottom.
             let y_mm = page_height_mm
                 - (block.y as f32 * POINTS_TO_MM)
-                - (block.height as f32 * POINTS_TO_MM);
-            let font_size_pt = block.font_size as f32;
+                - row_height_mm
+                + row_height_mm * BASELINE_LIFT;
+            let font_size_pt = block.font_size as f32 * OVERSIZE;
 
-            // Set text rendering mode to invisible (mode 3)
-            // This makes text searchable but not visible
             layer.set_text_rendering_mode(printpdf::TextRenderingMode::Invisible);
+            layer.set_text_scaling(100.0 / OVERSIZE);
 
             layer.use_text(&block.text, font_size_pt, Mm(x_mm), Mm(y_mm), font);
         }
+
+        // Restore default horizontal scaling for any subsequent content.
+        layer.set_text_scaling(100.0);
 
         Ok(())
     }

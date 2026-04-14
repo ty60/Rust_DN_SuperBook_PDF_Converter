@@ -101,6 +101,8 @@ def process_image(
         # Configure device
         if gpu_id is not None and torch is not None and torch.cuda.is_available():
             device = f"cuda:{gpu_id}"
+        elif torch is not None and getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+            device = "mps"
         else:
             device = "cpu"
 

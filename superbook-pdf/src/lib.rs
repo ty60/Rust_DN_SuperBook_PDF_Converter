@@ -143,6 +143,7 @@ pub mod vertical_detect;
 #[cfg(feature = "web")]
 pub mod web;
 pub mod yomitoku;
+pub mod yomitoku_pdf;
 
 // Issue #32-35: Cleanup and enhancement modules
 pub mod cleanup;

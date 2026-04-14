@@ -676,7 +676,7 @@ impl PrintPdfWriter {
     }
 
     /// Post-process PDF to embed PageLabels, PageLayout, and ViewerPreferences via lopdf.
-    fn apply_viewer_hints(
+    pub fn apply_viewer_hints(
         pdf_path: &Path,
         hints: &PdfViewerHints,
         page_count: usize,
@@ -769,6 +769,113 @@ impl PrintPdfWriter {
         }
 
         // Save the modified PDF
+        doc.save(pdf_path)
+            .map_err(|e| PdfWriterError::GenerationError(format!("lopdf save: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Scale every page's physical size by `72 / dpi`.
+    ///
+    /// YomiToku's ReportLab-based writer uses the rasterized image's pixel
+    /// dimensions as PDF point dimensions, so a 300-dpi A4 scan ends up
+    /// reported as 2467x3509 pt instead of 592x842 pt. This rewrites each
+    /// page's MediaBox/CropBox to the target size and wraps the content
+    /// stream in `q <s> 0 0 <s> 0 0 cm ... Q` so text and image operators
+    /// are scaled accordingly. Works on all viewers (unlike `/UserUnit`,
+    /// which Apple Preview ignores).
+    pub fn rescale_pages_to_points(pdf_path: &Path, dpi: u32) -> Result<()> {
+        use lopdf::{Document, Object, Stream};
+
+        if dpi == 0 {
+            return Ok(());
+        }
+        let scale = 72.0_f64 / dpi as f64;
+
+        let mut doc = Document::load(pdf_path)
+            .map_err(|e| PdfWriterError::GenerationError(format!("lopdf load: {}", e)))?;
+
+        let page_ids: Vec<(u32, u16)> = doc.page_iter().collect();
+
+        for id in page_ids {
+            // Remove a stale /UserUnit (e.g., from a prior run) so we don't
+            // double-scale.
+            if let Ok(page) = doc.get_object_mut(id) {
+                if let Ok(dict) = page.as_dict_mut() {
+                    dict.remove(b"UserUnit");
+                }
+            }
+
+            // Rescale box-like entries on the page dict.
+            for box_key in [b"MediaBox".as_ref(), b"CropBox", b"BleedBox", b"TrimBox", b"ArtBox"] {
+                let scaled: Option<Vec<Object>> = doc
+                    .get_object(id)
+                    .ok()
+                    .and_then(|o| o.as_dict().ok())
+                    .and_then(|d| d.get(box_key).ok())
+                    .and_then(|o| o.as_array().ok())
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|v| {
+                                let f = match v {
+                                    Object::Integer(i) => *i as f64,
+                                    Object::Real(r) => *r as f64,
+                                    _ => 0.0,
+                                };
+                                Object::Real((f * scale) as f32)
+                            })
+                            .collect()
+                    });
+                if let Some(new_arr) = scaled {
+                    if let Ok(page) = doc.get_object_mut(id) {
+                        if let Ok(dict) = page.as_dict_mut() {
+                            dict.set(box_key.to_vec(), Object::Array(new_arr));
+                        }
+                    }
+                }
+            }
+
+            // Wrap content streams with a scale CTM: `q s 0 0 s 0 0 cm ... Q`.
+            let prefix = format!("q {:.6} 0 0 {:.6} 0 0 cm\n", scale, scale).into_bytes();
+            let suffix = b"\nQ".to_vec();
+
+            let prefix_id = doc.add_object(Object::Stream(Stream::new(
+                lopdf::Dictionary::new(),
+                prefix,
+            )));
+            let suffix_id = doc.add_object(Object::Stream(Stream::new(
+                lopdf::Dictionary::new(),
+                suffix,
+            )));
+
+            let existing: Vec<Object> = {
+                let page = match doc.get_object(id) {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
+                let dict = match page.as_dict() {
+                    Ok(d) => d,
+                    Err(_) => continue,
+                };
+                match dict.get(b"Contents") {
+                    Ok(Object::Reference(r)) => vec![Object::Reference(*r)],
+                    Ok(Object::Array(a)) => a.clone(),
+                    _ => continue,
+                }
+            };
+
+            let mut new_contents = Vec::with_capacity(existing.len() + 2);
+            new_contents.push(Object::Reference(prefix_id));
+            new_contents.extend(existing);
+            new_contents.push(Object::Reference(suffix_id));
+
+            if let Ok(page) = doc.get_object_mut(id) {
+                if let Ok(dict) = page.as_dict_mut() {
+                    dict.set("Contents", Object::Array(new_contents));
+                }
+            }
+        }
+
         doc.save(pdf_path)
             .map_err(|e| PdfWriterError::GenerationError(format!("lopdf save: {}", e)))?;
 

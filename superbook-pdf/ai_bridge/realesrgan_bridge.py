@@ -190,8 +190,19 @@ def upscale_image(
                 model_path = alt
                 break
 
+    if torch.cuda.is_available():
+        device = f"cuda:{gpu_id}"
+    elif (
+        getattr(torch.backends, "mps", None) is not None
+        and torch.backends.mps.is_available()
+    ):
+        device = "mps"
+    else:
+        device = "cpu"
+
     try:
         # Initialize upsampler
+        # Note: MPS doesn't support half precision for some ops, so force fp32 on MPS
         upsampler = RealESRGANer(
             scale=netscale,
             model_path=model_path,
@@ -199,8 +210,8 @@ def upscale_image(
             tile=tile,
             tile_pad=10,
             pre_pad=0,
-            half=not fp32,
-            device=f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu",
+            half=False if device == "mps" else not fp32,
+            device=device,
         )
     except RuntimeError as e:
         if "CUDA" in str(e) or "GPU" in str(e):

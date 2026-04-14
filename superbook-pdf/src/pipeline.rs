@@ -1643,6 +1643,14 @@ impl PdfPipeline {
             PipelineError::PdfGenerationFailed(format!("copy OCR output: {}", e))
         })?;
 
+        // YomiToku writes pages using pixel dimensions as PDF points
+        // (2467x3509 pt for a 300-dpi A4 scan). Fix via /UserUnit.
+        if let Err(e) =
+            crate::PrintPdfWriter::rescale_pages_to_points(output_path, self.config.dpi)
+        {
+            progress.on_warning(&format!("Page rescale failed: {}", e));
+        }
+
         // YomiToku's writer drops our PageLabels / PageLayout /
         // ViewerPreferences. Re-apply them onto the OCR'd PDF.
         let is_rtl = is_vertical || self.config.assume_japanese_book;

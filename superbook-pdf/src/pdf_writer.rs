@@ -775,6 +775,43 @@ impl PrintPdfWriter {
         Ok(())
     }
 
+    /// Scale every page's display size by `72 / dpi` via `/UserUnit`.
+    ///
+    /// YomiToku's ReportLab-based writer uses the rasterized image's pixel
+    /// dimensions as PDF point dimensions, so a 300-dpi A4 scan ends up
+    /// reported as 2467x3509 pt instead of 592x842 pt. Setting `UserUnit`
+    /// rescales the display without touching the content stream.
+    /// Requires PDF 1.6+, so the version is bumped if needed.
+    pub fn rescale_pages_to_points(pdf_path: &Path, dpi: u32) -> Result<()> {
+        use lopdf::{Document, Object};
+
+        if dpi == 0 {
+            return Ok(());
+        }
+        let user_unit = 72.0_f32 / dpi as f32;
+
+        let mut doc = Document::load(pdf_path)
+            .map_err(|e| PdfWriterError::GenerationError(format!("lopdf load: {}", e)))?;
+
+        if doc.version.as_str() < "1.6" {
+            doc.version = "1.6".to_string();
+        }
+
+        let page_ids: Vec<(u32, u16)> = doc.page_iter().collect();
+        for id in page_ids {
+            if let Ok(page) = doc.get_object_mut(id) {
+                if let Ok(dict) = page.as_dict_mut() {
+                    dict.set("UserUnit", Object::Real(user_unit));
+                }
+            }
+        }
+
+        doc.save(pdf_path)
+            .map_err(|e| PdfWriterError::GenerationError(format!("lopdf save: {}", e)))?;
+
+        Ok(())
+    }
+
     /// Create PDF from image iterator (streaming mode for memory efficiency)
     pub fn create_streaming(
         images: impl Iterator<Item = PathBuf>,

@@ -2,7 +2,7 @@
 //!
 //! Provides the main server struct and configuration.
 
-use axum::Router;
+use axum::{extract::DefaultBodyLimit, Router};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -132,6 +132,7 @@ impl WebServer {
             .nest("/api", api_routes())
             .nest("/ws", ws_routes())
             .layer(self.config.cors.clone().into_layer())
+            .layer(DefaultBodyLimit::max(self.config.upload_limit))
             .layer(RequestBodyLimitLayer::new(self.config.upload_limit))
             .with_state(self.state.clone())
     }

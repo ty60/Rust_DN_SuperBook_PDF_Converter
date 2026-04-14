@@ -656,24 +656,29 @@ impl PdfPipeline {
         // Step 11: Vertical Text Detection
         let is_vertical = self.step_vertical_detection(&current_images, progress)?;
 
-        // Step 12: OCR with YomiToku (if enabled)
-        let ocr_results = if self.config.ocr {
-            self.step_ocr(&current_images, progress)?
-        } else {
-            vec![]
-        };
-
-        // Step 13: Generate PDF
+        // Step 12: Generate enhanced PDF (without OCR layer).
         progress.on_step_start("Generating output PDF...");
         self.step_generate_pdf(
             &current_images,
             &output_path,
             &reader.info,
-            &ocr_results,
             page_number_shift,
             is_vertical,
             progress,
         )?;
+
+        // Step 13: OCR pass — shell out to the `yomitoku` CLI to overlay a
+        // searchable text layer on the enhanced PDF. Mirrors the original
+        // C# implementation (SuperPdfUtil.cs → PdfYomitokuLib.PerformOcrAsync).
+        if self.config.ocr {
+            self.step_ocr_pdf(
+                &output_path,
+                &work_dir,
+                page_number_shift,
+                is_vertical,
+                progress,
+            )?;
+        }
 
         // Get output file size
         let output_size = std::fs::metadata(&output_path)
@@ -1595,160 +1600,89 @@ impl PdfPipeline {
         }
     }
 
-    /// Step 12: OCR with YomiToku
-    fn step_ocr<P: ProgressCallback>(
+    /// Step 13: Shell-out OCR pass.
+    ///
+    /// Runs the `yomitoku` CLI on the already-generated enhanced PDF to
+    /// produce a searchable PDF, then overwrites the output in place and
+    /// re-applies PDF viewer hints (which otherwise would be lost because
+    /// yomitoku rewrites the whole document).
+    fn step_ocr_pdf<P: ProgressCallback>(
         &self,
-        images: &[PathBuf],
+        output_path: &Path,
+        work_dir: &Path,
+        page_number_shift: Option<i32>,
+        is_vertical: bool,
         progress: &P,
-    ) -> Result<Vec<Option<crate::OcrResult>>, PipelineError> {
-        progress.on_step_start("Running OCR (YomiToku)...");
+    ) -> Result<(), PipelineError> {
+        use crate::yomitoku_pdf;
+
+        progress.on_step_start("Running OCR (YomiToku PDF)...");
 
         let venv_path = crate::resolve_venv_path();
+        let ocr_dir = work_dir.join("ocr_out");
+        if ocr_dir.exists() {
+            let _ = std::fs::remove_dir_all(&ocr_dir);
+        }
 
-        let bridge_config = crate::AiBridgeConfig::builder()
-            .venv_path(venv_path)
-            .build();
+        let device = yomitoku_pdf::Device::autodetect(self.config.gpu);
+        let opts = yomitoku_pdf::Options {
+            device,
+            dpi: self.config.dpi,
+            ..Default::default()
+        };
 
-        let bridge = match crate::SubprocessBridge::new(bridge_config) {
-            Ok(b) => b,
+        let ocr_pdf = match yomitoku_pdf::ocr_pdf(&venv_path, output_path, &ocr_dir, &opts) {
+            Ok(p) => p,
             Err(e) => {
-                progress.on_warning(&format!("YomiToku not available: {}", e));
-                return Ok(vec![]);
+                progress.on_warning(&format!("OCR skipped: {}", e));
+                return Ok(());
             }
         };
 
-        let yomitoku = crate::YomiToku::new(bridge);
-        let mut ocr_opts = crate::YomiTokuOptions::builder();
-        if self.config.gpu {
-            ocr_opts = ocr_opts.use_gpu(true).gpu_id(0);
-        }
-        let ocr_opts = ocr_opts.build();
+        std::fs::copy(&ocr_pdf, output_path).map_err(|e| {
+            PipelineError::PdfGenerationFailed(format!("copy OCR output: {}", e))
+        })?;
 
-        let mut results = Vec::new();
-        let total = images.len();
-        for (i, img_path) in images.iter().enumerate() {
-            match yomitoku.ocr(img_path, &ocr_opts) {
-                Ok(result) => results.push(Some(result)),
-                Err(_) => results.push(None),
+        // YomiToku's writer drops our PageLabels / PageLayout /
+        // ViewerPreferences. Re-apply them onto the OCR'd PDF.
+        let is_rtl = is_vertical || self.config.assume_japanese_book;
+        if page_number_shift.is_some() || is_rtl {
+            let hints = crate::pdf_writer::PdfViewerHints {
+                page_number_shift,
+                is_rtl,
+                first_logical_page: 1,
+            };
+            let page_count = crate::LopdfReader::new(output_path)
+                .map(|r| r.info.page_count)
+                .unwrap_or(0);
+            if let Err(e) =
+                crate::PrintPdfWriter::apply_viewer_hints(output_path, &hints, page_count)
+            {
+                progress.on_warning(&format!("Viewer hints re-apply failed: {}", e));
             }
-            progress.on_step_progress(i + 1, total);
         }
 
-        let success_count = results.iter().filter(|r| r.is_some()).count();
-        progress.on_step_complete("OCR", &format!("{}/{} pages", success_count, results.len()));
-        Ok(results)
+        progress.on_step_complete("OCR", "searchable PDF");
+        Ok(())
     }
 
-    /// Step 13: Generate PDF
-    #[allow(clippy::too_many_arguments)]
+    /// Step 12: Generate enhanced PDF (image-only; OCR runs after as a
+    /// separate shell-out step).
     fn step_generate_pdf<P: ProgressCallback>(
         &self,
         images: &[PathBuf],
         output_path: &Path,
         pdf_info: &crate::PdfDocument,
-        ocr_results: &[Option<crate::OcrResult>],
         page_number_shift: Option<i32>,
         is_vertical: bool,
         _progress: &P,
     ) -> Result<(), PipelineError> {
-        use crate::pdf_writer::{OcrLayer, OcrPageText, PdfViewerHints, TextBlock};
+        use crate::pdf_writer::PdfViewerHints;
 
-        // Convert OCR results to OcrLayer.
-        // YomiToku returns bboxes in image pixel coordinates, but TextBlock expects points.
-        // At the configured DPI, 1 pixel = 72 / dpi points.
-        let px_to_pt = 72.0_f64 / self.config.dpi as f64;
-        let ocr_layer = if !ocr_results.is_empty() {
-            let pages: Vec<OcrPageText> = ocr_results
-                .iter()
-                .enumerate()
-                .filter_map(|(idx, result): (usize, &Option<crate::OcrResult>)| {
-                    result.as_ref().map(|r| OcrPageText {
-                        page_index: idx,
-                        blocks: r
-                            .text_blocks
-                            .iter()
-                            .flat_map(|b| {
-                                let x_pt = b.bbox.0 as f64 * px_to_pt;
-                                let y_pt = b.bbox.1 as f64 * px_to_pt;
-                                let w_pt = b.bbox.2 as f64 * px_to_pt;
-                                let h_pt = b.bbox.3 as f64 * px_to_pt;
-                                let vertical =
-                                    matches!(b.direction, crate::TextDirection::Vertical);
-                                // YomiToku paragraphs can span multiple visual lines. Split
-                                // on newlines and lay each line out along the block's
-                                // writing axis so invisible text tracks the page content.
-                                let lines: Vec<&str> = b
-                                    .text
-                                    .split('\n')
-                                    .map(|s| s.trim_end())
-                                    .filter(|s| !s.is_empty())
-                                    .collect();
-                                let n = lines.len().max(1) as f64;
-                                lines
-                                    .into_iter()
-                                    .enumerate()
-                                    .map(|(i, line)| {
-                                        let k = i as f64;
-                                        // Approximate glyph advance: CJK ≈ 1em/char,
-                                        // ASCII ≈ 0.5em/char. Treat non-ASCII as
-                                        // full-width to size the font conservatively.
-                                        let em_units: f64 = line
-                                            .chars()
-                                            .map(|c| if c.is_ascii() { 0.5 } else { 1.0 })
-                                            .sum::<f64>()
-                                            .max(1.0);
-                                        if vertical {
-                                            let col_w = w_pt / n;
-                                            // Fit font to column width (glyph size)
-                                            // and to column height (total advance).
-                                            let fit_len = h_pt / em_units;
-                                            let font_size = col_w.min(fit_len).max(1.0);
-                                            TextBlock {
-                                                x: x_pt + (n - 1.0 - k) * col_w,
-                                                y: y_pt,
-                                                width: col_w,
-                                                height: h_pt,
-                                                text: line.to_string(),
-                                                font_size,
-                                                vertical: true,
-                                            }
-                                        } else {
-                                            let row_h = h_pt / n;
-                                            let fit_len = w_pt / em_units;
-                                            let font_size = row_h.min(fit_len).max(1.0);
-                                            TextBlock {
-                                                x: x_pt,
-                                                y: y_pt + k * row_h,
-                                                width: w_pt,
-                                                height: row_h,
-                                                text: line.to_string(),
-                                                font_size,
-                                                vertical: false,
-                                            }
-                                        }
-                                    })
-                                    .collect::<Vec<_>>()
-                            })
-                            .collect(),
-                    })
-                })
-                .collect();
-
-            if pages.is_empty() {
-                None
-            } else {
-                Some(OcrLayer { pages })
-            }
-        } else {
-            None
-        };
-
-        // Determine RTL reading direction:
-        // Japanese books use R2L page progression regardless of text orientation.
-        // Also enable for vertical text detection (covers CJK vertical writing).
+        // Japanese books use R2L page progression regardless of text
+        // orientation; also enable for detected vertical text.
         let is_rtl = is_vertical || self.config.assume_japanese_book;
 
-        // Build viewer hints from pipeline results
         let viewer_hints = if page_number_shift.is_some() || is_rtl {
             Some(PdfViewerHints {
                 page_number_shift,
@@ -1763,10 +1697,6 @@ impl PdfPipeline {
             .dpi(self.config.dpi)
             .jpeg_quality(self.config.jpeg_quality)
             .metadata(pdf_info.metadata.clone());
-
-        if let Some(layer) = ocr_layer {
-            pdf_builder = pdf_builder.ocr_layer(layer);
-        }
 
         if let Some(hints) = viewer_hints {
             pdf_builder = pdf_builder.viewer_hints(hints);

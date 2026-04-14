@@ -676,7 +676,7 @@ impl PrintPdfWriter {
     }
 
     /// Post-process PDF to embed PageLabels, PageLayout, and ViewerPreferences via lopdf.
-    fn apply_viewer_hints(
+    pub fn apply_viewer_hints(
         pdf_path: &Path,
         hints: &PdfViewerHints,
         page_count: usize,

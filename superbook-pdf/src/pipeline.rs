@@ -1646,7 +1646,10 @@ impl PdfPipeline {
     ) -> Result<(), PipelineError> {
         use crate::pdf_writer::{OcrLayer, OcrPageText, PdfViewerHints, TextBlock};
 
-        // Convert OCR results to OcrLayer
+        // Convert OCR results to OcrLayer.
+        // YomiToku returns bboxes in image pixel coordinates, but TextBlock expects points.
+        // At the configured DPI, 1 pixel = 72 / dpi points.
+        let px_to_pt = 72.0_f64 / self.config.dpi as f64;
         let ocr_layer = if !ocr_results.is_empty() {
             let pages: Vec<OcrPageText> = ocr_results
                 .iter()
@@ -1658,12 +1661,12 @@ impl PdfPipeline {
                             .text_blocks
                             .iter()
                             .map(|b| TextBlock {
-                                x: b.bbox.0 as f64,
-                                y: b.bbox.1 as f64,
-                                width: (b.bbox.2 - b.bbox.0) as f64,
-                                height: (b.bbox.3 - b.bbox.1) as f64,
+                                x: b.bbox.0 as f64 * px_to_pt,
+                                y: b.bbox.1 as f64 * px_to_pt,
+                                width: (b.bbox.2 - b.bbox.0) as f64 * px_to_pt,
+                                height: (b.bbox.3 - b.bbox.1) as f64 * px_to_pt,
                                 text: b.text.clone(),
-                                font_size: b.font_size.unwrap_or(12.0) as f64,
+                                font_size: b.font_size.unwrap_or(12.0) as f64 * px_to_pt,
                                 vertical: matches!(b.direction, crate::TextDirection::Vertical),
                             })
                             .collect(),
